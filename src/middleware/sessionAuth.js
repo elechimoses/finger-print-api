@@ -5,7 +5,10 @@ import { db } from '../store/mockDb.js';
  * Checks the session_token cookie and verifies it against the active session store.
  */
 export const requireSession = async (req, res, next) => {
-  const token = req.cookies?.session_token;
+  const token =
+    req.cookies?.session_token ||
+    req.headers['x-session-token'] ||
+    req.headers.authorization?.replace(/^Bearer\s+/i, '');
 
   if (!token) {
     return res.status(401).json({

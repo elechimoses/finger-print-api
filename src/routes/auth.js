@@ -52,10 +52,11 @@ router.post('/unlock', async (req, res, next) => {
     await db.setSession(token, expiresAt);
 
     // Set secure HTTP-only cookie
+    const isProd = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
     res.cookie('session_token', token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'lax',
       maxAge: 2 * 60 * 60 * 1000 // 2 hours
     });
 
@@ -76,6 +77,7 @@ router.post('/unlock', async (req, res, next) => {
     return res.status(200).json({
       status: 'success',
       unlocked: true,
+      token,
       message: 'Site unlocked successfully.'
     });
   } catch (err) {
@@ -89,7 +91,10 @@ router.post('/unlock', async (req, res, next) => {
  * @access  Public
  */
 router.get('/status', async (req, res, next) => {
-  const token = req.cookies?.session_token;
+  const token =
+    req.cookies?.session_token ||
+    req.headers['x-session-token'] ||
+    req.headers.authorization?.replace(/^Bearer\s+/i, '');
 
   if (!token) {
     return res.status(200).json({ unlocked: false });
@@ -124,7 +129,12 @@ router.post('/lock', async (req, res, next) => {
       await db.deleteSession(token);
     }
 
-    res.clearCookie('session_token');
+    const isProd = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+    res.clearCookie('session_token', {
+      httpOnly: true,
+      secure: isProd,
+      sameSite: isProd ? 'none' : 'lax',
+    });
 
     return res.status(200).json({
       status: 'success',

@@ -93,6 +93,7 @@ app.use('/admin', adminFirmwareRouter);
 
 // 8. Public Signed Callbacks (Uses HMAC Signature Auth inside router)
 app.use('/api/public/terminal', publicTerminalRouter);
+app.use('/public/terminal', publicTerminalRouter);
 
 // 9. Live SSE APDU stream (Public dashboard telemetry)
 app.use('/api/apdu', apduStreamRouter);

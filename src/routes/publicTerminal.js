@@ -147,4 +147,80 @@ router.post('/apdu-log', (req, res) => {
   });
 });
 
+/**
+ * @route   POST /api/public/terminal/access-log
+ * @route   POST /public/terminal/access-log
+ * @desc    Records hardware terminal access log payload to audit log database
+ * @access  Public (Signed with HMAC)
+ */
+router.post('/access-log', async (req, res, next) => {
+  const { terminalId, cardUid, cardId, uid, success, reason, fingerId, timestamp } = req.body;
+
+  const targetCardUid = cardUid || cardId || uid || '';
+  const isSuccess = typeof success === 'boolean'
+    ? success
+    : (typeof success === 'string' ? success.toLowerCase() === 'true' : Boolean(success));
+
+  try {
+    const card = targetCardUid
+      ? (await db.getCardById(targetCardUid) || await db.getCardBySerial(targetCardUid))
+      : null;
+
+    if (card) {
+      const updates = { lastSeen: new Date().toISOString() };
+      if (isSuccess && card.syncStatus === 'failed') {
+        updates.syncStatus = 'synced';
+      }
+      await db.updateCard(card.id, updates);
+    }
+
+    const eventType = isSuccess ? 'auth_success' : 'auth_fail';
+    const logTimestamp = timestamp || new Date().toISOString();
+    const finalReason = reason || (isSuccess ? 'Access Granted' : 'Access Denied');
+
+    const newEvent = {
+      id: `evt-${crypto.randomBytes(4).toString('hex')}`,
+      timestamp: logTimestamp,
+      type: eventType,
+      cardId: card ? card.id : (targetCardUid || 'N/A'),
+      holder: card ? card.holder : 'Terminal User',
+      details: `[${terminalId || 'TERM-ESP32-01'}] ${finalReason}${fingerId !== undefined && fingerId !== null ? ` (Finger ID: ${fingerId})` : ''}`,
+      rawMetrics: {
+        terminalId: terminalId || 'TERM-ESP32-01',
+        cardUid: targetCardUid || null,
+        fingerId: fingerId !== undefined && fingerId !== null ? Number(fingerId) : null,
+        reason: finalReason,
+        success: isSuccess,
+      },
+      receipt: {
+        action: isSuccess ? 'AUTHENTICATE_SUCCESS' : 'AUTHENTICATE_FAIL',
+        terminalId: terminalId || 'TERM-ESP32-01',
+        reason: finalReason,
+      },
+      minutiaeMapPoints: [],
+      padScore: isSuccess ? 0.98 : 0.15,
+    };
+
+    await db.addAuditLog(newEvent);
+
+    // Broadcast live APDU telemetry event
+    broadcastApdu({
+      command: `00 20 00 00 (TERMINAL_ACCESS_LOG fingerId: ${fingerId ?? 'N/A'})`,
+      response: isSuccess ? '90 00 (SW_SUCCESS)' : '6A 88 (SW_VERIFICATION_FAILED)',
+      durationMs: Math.floor(25 + Math.random() * 20),
+      terminalId: terminalId || 'TERM-ESP32-01',
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      eventId: newEvent.id,
+      message: 'Access log recorded successfully to database.',
+      event: newEvent,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;
+

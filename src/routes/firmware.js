@@ -296,10 +296,21 @@ router.post('/complete-enrollment', async (req, res, next) => {
       durationMs: 38,
     });
 
-    await db.deleteEnrollmentSession('active_admin_session');
-
     return res.status(200).json({
+      success: true,
+      user_id: newCard.id,
+      name: newCard.holder,
+      rfid_uid: newCard.serial,
+      fingerprint_id: newCard.fingerId,
+      created_at: newCard.lastSeen,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 /**
+
  * 5. POST /access-log
  * Hardware Access Log callback endpoint (called directly by ESP32 hardware)
  * Payload format from hardware:

@@ -162,6 +162,12 @@ router.post('/access-log', async (req, res, next) => {
       } catch (e) {
         body = {};
       }
+    } else if ((!body || Object.keys(body).length === 0) && req.rawBody && req.rawBody.length > 0) {
+      try {
+        body = JSON.parse(req.rawBody.toString('utf8'));
+      } catch (e) {
+        body = {};
+      }
     }
 
     const terminalId = body.terminalId || body.terminal_id || req.query?.terminalId || 'TERM-ESP32-01';
@@ -176,7 +182,7 @@ router.post('/access-log', async (req, res, next) => {
     const timestamp = body.timestamp || req.query?.timestamp || new Date().toISOString();
 
     let card = null;
-    if (cardUid) {
+    if (cardUid && cardUid !== 'UNKNOWN') {
       card = await db.getCardBySerial(cardUid) || await db.getCardById(cardUid);
       if (!card) {
         const { cards = [] } = await db.getCards({ pageSize: 1000 });
@@ -194,15 +200,32 @@ router.post('/access-log', async (req, res, next) => {
       await db.updateCard(card.id, updates);
     }
 
-    const eventType = isSuccess ? 'auth_success' : 'auth_fail';
+    // Determine smart event type based on reason & success
+    let eventType = isSuccess ? 'auth_success' : 'auth_fail';
+    const reasonLower = (reason || '').toLowerCase();
+    if (!isSuccess) {
+      if (reasonLower.includes('enroll')) {
+        eventType = 'enrollment';
+      } else if (reasonLower.includes('spoof') || reasonLower.includes('tamper') || reasonLower.includes('fake') || reasonLower.includes('liveness')) {
+        eventType = 'spoof';
+      } else {
+        eventType = 'auth_fail';
+      }
+    } else {
+      if (reasonLower.includes('enroll')) {
+        eventType = 'enrollment';
+      }
+    }
+
     const finalFingerId = fingerId !== undefined && fingerId !== null ? Number(fingerId) : null;
+    const padScoreVal = isSuccess ? 0.98 : (eventType === 'spoof' ? 0.15 : 0.45);
 
     const newEvent = {
       id: `evt-${crypto.randomBytes(4).toString('hex')}`,
       timestamp,
       type: eventType,
       cardId: card ? card.id : null,
-      holder: card ? card.holder : (cardUid ? `Terminal User (${cardUid})` : 'Terminal User'),
+      holder: card ? card.holder : (cardUid && cardUid !== 'UNKNOWN' ? `Terminal User (${cardUid})` : 'Terminal User'),
       details: `[${terminalId}] ${reason}${finalFingerId !== null ? ` (Finger ID: ${finalFingerId})` : ''}${cardUid ? ` [Card UID: ${cardUid}]` : ''}`,
       rawMetrics: {
         terminalId,
@@ -210,22 +233,23 @@ router.post('/access-log', async (req, res, next) => {
         fingerId: finalFingerId,
         reason,
         success: isSuccess,
+        padConfidence: padScoreVal,
       },
       receipt: {
-        action: isSuccess ? 'AUTHENTICATE_SUCCESS' : 'AUTHENTICATE_FAIL',
+        action: isSuccess ? 'AUTHENTICATE_SUCCESS' : (eventType === 'enrollment' ? 'ENROLLMENT_FAIL' : 'AUTHENTICATE_FAIL'),
         terminalId,
         reason,
       },
       minutiaeMapPoints: [],
-      padScore: isSuccess ? 0.98 : 0.15,
+      padScore: padScoreVal,
     };
 
     await db.addAuditLog(newEvent);
 
-    // Broadcast live APDU telemetry event
+    // Broadcast live APDU telemetry event for live streaming dashboard
     broadcastApdu({
-      command: `00 20 00 00 (TERMINAL_ACCESS_LOG fingerId: ${finalFingerId ?? 'N/A'})`,
-      response: isSuccess ? '90 00 (SW_SUCCESS)' : '6A 88 (SW_VERIFICATION_FAILED)',
+      command: `00 20 00 00 (${eventType.toUpperCase()} fingerId: ${finalFingerId ?? 'N/A'})`,
+      response: isSuccess ? '90 00 (SW_SUCCESS)' : (eventType === 'enrollment' ? '6F 00 (SW_ENROLL_ERR)' : '6A 88 (SW_VERIFICATION_FAILED)'),
       durationMs: Math.floor(25 + Math.random() * 20),
       terminalId,
     });
@@ -243,5 +267,6 @@ router.post('/access-log', async (req, res, next) => {
 });
 
 export default router;
+
 
 

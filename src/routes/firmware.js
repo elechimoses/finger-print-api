@@ -13,10 +13,25 @@ const router = express.Router();
  */
 router.post('/verify', async (req, res, next) => {
   try {
-    const uid = req.body?.uid || req.query?.uid;
+    let body = req.body || {};
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch (e) {
+        body = {};
+      }
+    } else if ((!body || Object.keys(body).length === 0) && req.rawBody && req.rawBody.length > 0) {
+      try {
+        body = JSON.parse(req.rawBody.toString('utf8'));
+      } catch (e) {
+        body = {};
+      }
+    }
+
+    const uid = body.uid || body.cardUid || body.card_uid || body.rfid_uid || body.cardId || req.query?.uid || req.query?.cardUid;
 
     if (!uid) {
-      return res.status(200).json({ status: false, message: 'Missing RFID UID parameter.', livenessScore: 0 });
+      return res.status(200).json({ status: false, success: false, message: 'Missing RFID UID parameter.', livenessScore: 0 });
     }
 
     let card = await db.getCardBySerial(uid);
@@ -26,12 +41,30 @@ router.post('/verify', async (req, res, next) => {
     if (!card) {
       const { cards = [] } = await db.getCards({ pageSize: 1000 });
       card = cards.find(
-        (c) => c.serial === uid || c.id === uid || c.serial?.toLowerCase() === uid.toLowerCase()
+        (c) => c.serial === uid || c.id === uid || c.serial?.toLowerCase() === String(uid).toLowerCase()
       );
     }
 
     if (card && card.status === 'active') {
-      const livenessScore = Number(req.body?.livenessScore || req.body?.padScore || 0.98);
+      const livenessScore = Number(body.livenessScore || body.padScore || req.body?.livenessScore || 0.98);
+
+      const updates = { lastSeen: new Date().toISOString() };
+      if (card.syncStatus === 'failed') {
+        updates.syncStatus = 'synced';
+      }
+      await db.updateCard(card.id, updates);
+
+      await db.addAuditLog({
+        id: `evt-${crypto.randomBytes(4).toString('hex')}`,
+        timestamp: new Date().toISOString(),
+        type: 'auth_success',
+        cardId: card.id,
+        holder: card.holder,
+        details: `Access granted for RFID UID: ${uid} (Fingerprint Liveness Score: ${Math.round(livenessScore * 100)}%)`,
+        padScore: livenessScore,
+        rawMetrics: { livenessScore, rfidUid: uid, fingerId: card.fingerId },
+        receipt: { action: 'AUTHENTICATE_SUCCESS' }
+      });
 
       broadcastApdu({
         command: `00 20 00 00 08 (VERIFY FINGERPRINT ID #${card.fingerId || 1})`,
@@ -41,14 +74,32 @@ router.post('/verify', async (req, res, next) => {
 
       return res.status(200).json({
         status: true,
+        success: true,
         fingerId: card.fingerId || card.id,
+        fingerprint_id: card.fingerId || card.id,
         cardId: card.id,
+        user_id: card.id,
         holder: card.holder,
+        name: card.holder,
         livenessScore,
       });
     }
 
-    const failureLiveness = Number(req.body?.livenessScore || req.body?.padScore || 0.15);
+    const failureLiveness = Number(body.livenessScore || body.padScore || req.body?.livenessScore || 0.15);
+
+    await db.addAuditLog({
+      id: `evt-${crypto.randomBytes(4).toString('hex')}`,
+      timestamp: new Date().toISOString(),
+      type: 'auth_fail',
+      cardId: card ? card.id : null,
+      holder: card ? card.holder : `Unknown User (${uid})`,
+      details: card
+        ? `Access denied (Status: ${card.status}) for RFID UID: ${uid}`
+        : `Access denied (Unknown Card / Fingerprint mismatch for UID: ${uid})`,
+      padScore: failureLiveness,
+      rawMetrics: { livenessScore: failureLiveness, rfidUid: uid },
+      receipt: { action: 'AUTHENTICATE_FAIL' }
+    });
 
     broadcastApdu({
       command: `00 20 00 00 08 (VERIFY FINGERPRINT/RFID)`,
@@ -58,6 +109,7 @@ router.post('/verify', async (req, res, next) => {
 
     return res.status(200).json({
       status: false,
+      success: false,
       message: card ? `Access denied (Card status: ${card.status})` : 'Access denied. Unknown card or liveness check failed.',
       livenessScore: failureLiveness,
     });
@@ -65,6 +117,7 @@ router.post('/verify', async (req, res, next) => {
     next(err);
   }
 });
+
 
 
 /**

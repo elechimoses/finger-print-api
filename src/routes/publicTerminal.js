@@ -194,7 +194,7 @@ router.post('/access-log', async (req, res, next) => {
     if (cardUid && cardUid !== 'UNKNOWN') {
       card = await db.getCardBySerial(cardUid) || await db.getCardById(cardUid);
       if (!card) {
-        const { cards = [] } = await db.getCards({ pageSize: 1000 });
+        const { cards = [] } = (await db.getCards({ pageSize: 1000 })) || {};
         card = cards.find(
           (c) => c.serial === cardUid || c.id === cardUid || c.serial?.toLowerCase() === String(cardUid).toLowerCase()
         );
@@ -238,15 +238,16 @@ router.post('/access-log', async (req, res, next) => {
     }
 
     if (!targetEvent && cardUid && cardUid !== 'UNKNOWN') {
-      const { events: recentLogs = [] } = await db.getAuditLogs({ limit: 10 });
+      const { events: recentLogs = [] } = (await db.getAuditLogs({ limit: 10 })) || {};
       const nowMs = Date.now();
       targetEvent = recentLogs.find((l) => {
-        if (!l.timestamp) return false;
+        if (!l || !l.timestamp) return false;
         const ageMs = nowMs - new Date(l.timestamp).getTime();
         const matchesCard = (l.cardId === (card ? card.id : null)) || (l.rawMetrics?.rfidUid === cardUid);
         return matchesCard && ageMs >= 0 && ageMs <= 30000;
       });
     }
+
 
     if (targetEvent) {
       // Update existing verify event with full hardware telemetry

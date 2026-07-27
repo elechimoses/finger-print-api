@@ -450,11 +450,52 @@ export const db = {
         if (error) {
           console.error('[Supabase addAuditLog error]:', error);
         }
+
       }
     } catch (e) {
       console.error('[Supabase addAuditLog exception]:', e);
     }
   },
+
+
+  async updateAuditLog(eventId, updates) {
+
+    if (!eventId || !updates) return;
+
+    const log = inMemory.auditLogs.find(l => l.id === eventId);
+    if (log) {
+      if (updates.type !== undefined) log.type = updates.type;
+      if (updates.details !== undefined) log.details = updates.details;
+      if (updates.rawMetrics !== undefined) log.rawMetrics = { ...(log.rawMetrics || {}), ...(updates.rawMetrics || {}) };
+      if (updates.receipt !== undefined) log.receipt = { ...(log.receipt || {}), ...(updates.receipt || {}) };
+      if (updates.padScore !== undefined) log.padScore = updates.padScore;
+      if (updates.cardId !== undefined) log.cardId = updates.cardId;
+      if (updates.holder !== undefined) log.holder = updates.holder;
+      if (updates.timestamp !== undefined) log.timestamp = updates.timestamp;
+    }
+
+    try {
+      if (supabase) {
+        const dbUpdates = {};
+        if (updates.type !== undefined) dbUpdates.type = updates.type;
+        if (updates.details !== undefined) dbUpdates.details = updates.details;
+        if (updates.rawMetrics !== undefined) dbUpdates.raw_metrics = updates.rawMetrics;
+        if (updates.receipt !== undefined) dbUpdates.receipt = updates.receipt;
+        if (updates.padScore !== undefined) dbUpdates.pad_score = updates.padScore;
+        if (updates.cardId !== undefined) dbUpdates.card_id = updates.cardId;
+        if (updates.holder !== undefined) dbUpdates.holder = updates.holder;
+        if (updates.timestamp !== undefined) dbUpdates.timestamp = updates.timestamp;
+
+        const { error } = await supabase.from('audit_logs').update(dbUpdates).eq('id', eventId);
+        if (error) {
+          console.error('[Supabase updateAuditLog error]:', error);
+        }
+      }
+    } catch (e) {
+      console.error('[Supabase updateAuditLog exception]:', e);
+    }
+  },
+
 
 
   // 7. Enrollment Sessions

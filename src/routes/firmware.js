@@ -298,18 +298,6 @@ router.post('/complete-enrollment', async (req, res, next) => {
     await db.deleteEnrollmentSession('active_admin_session');
 
     return res.status(200).json({
-      success: true,
-      user_id: newCard.id,
-      name: newCard.holder,
-      rfid_uid: newCard.serial,
-      fingerprint_id: newCard.fingerId,
-      created_at: newCard.lastSeen,
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
 /**
  * 5. POST /access-log
  * Hardware Access Log callback endpoint (called directly by ESP32 hardware)
@@ -317,6 +305,7 @@ router.post('/complete-enrollment', async (req, res, next) => {
  * {
  *   "terminalId": "TERM-01",
  *   "cardUid": "...",
+ *   "verifyId": "evt-...",
  *   "success": true | false | "true" | "false",
  *   "reason": "...",
  *   "fingerId": 1,
@@ -342,10 +331,19 @@ router.post('/access-log', async (req, res, next) => {
 
     const terminalId = body.terminalId || body.terminal_id || req.query?.terminalId || 'TERM-ESP32-01';
     const cardUid = body.cardUid || body.card_uid || body.cardId || body.uid || req.query?.cardUid || req.query?.uid || '';
-    const rawSuccess = body.success !== undefined ? body.success : req.query?.success;
-    const isSuccess = typeof rawSuccess === 'boolean'
-      ? rawSuccess
-      : (typeof rawSuccess === 'string' ? rawSuccess.toLowerCase() === 'true' : Boolean(rawSuccess));
+    const rawSuccess = body.success !== undefined ? body.success : (body.status !== undefined ? body.status : req.query?.success);
+    
+    let isSuccess = false;
+    if (typeof rawSuccess === 'boolean') {
+      isSuccess = rawSuccess;
+    } else if (typeof rawSuccess === 'number') {
+      isSuccess = rawSuccess === 1;
+    } else if (typeof rawSuccess === 'string') {
+      const lower = rawSuccess.trim().toLowerCase();
+      isSuccess = lower === 'true' || lower === '1' || lower === 'success' || lower === 'grant';
+    } else {
+      isSuccess = Boolean(rawSuccess);
+    }
 
     const reason = body.reason || req.query?.reason || (isSuccess ? 'Access Granted' : 'Access Denied');
     const fingerId = body.fingerId !== undefined ? body.fingerId : (body.finger_id !== undefined ? body.finger_id : req.query?.fingerId);
@@ -370,7 +368,6 @@ router.post('/access-log', async (req, res, next) => {
       await db.updateCard(card.id, updates);
     }
 
-    // Determine smart event type based on reason & success
     let eventType = isSuccess ? 'auth_success' : 'auth_fail';
     const reasonLower = (reason || '').toLowerCase();
     if (!isSuccess) {
@@ -390,13 +387,74 @@ router.post('/access-log', async (req, res, next) => {
     const finalFingerId = fingerId !== undefined && fingerId !== null ? Number(fingerId) : null;
     const padScoreVal = isSuccess ? 0.98 : (eventType === 'spoof' ? 0.15 : 0.45);
 
+    // --- Correlation Logic: Match log to recent /verify request ---
+    const verifyId = body.verifyId || body.verify_id || body.logId || body.transactionId || body.transaction_id || req.query?.verifyId || req.query?.logId;
+
+    let targetEvent = null;
+    if (verifyId) {
+      targetEvent = await db.getAuditLogById(verifyId);
+    }
+
+    if (!targetEvent && cardUid && cardUid !== 'UNKNOWN') {
+      const { events: recentLogs = [] } = await db.getAuditLogs({ limit: 10 });
+      const nowMs = Date.now();
+      targetEvent = recentLogs.find((l) => {
+        if (!l.timestamp) return false;
+        const ageMs = nowMs - new Date(l.timestamp).getTime();
+        const matchesCard = (l.cardId === (card ? card.id : null)) || (l.rawMetrics?.rfidUid === cardUid);
+        return matchesCard && ageMs >= 0 && ageMs <= 30000;
+      });
+    }
+
+    if (targetEvent) {
+      // Update existing verify event with full hardware telemetry
+      await db.updateAuditLog(targetEvent.id, {
+        type: eventType,
+        details: `[${terminalId}] ${reason}${finalFingerId !== null ? ` (Finger ID: ${finalFingerId})` : ''}${cardUid ? ` [Match On Card: ${cardUid}]` : ''}`,
+        padScore: padScoreVal,
+        rawMetrics: {
+          ...(targetEvent.rawMetrics || {}),
+          terminalId,
+          cardUid: cardUid || null,
+          fingerId: finalFingerId,
+          reason,
+          success: isSuccess,
+          padConfidence: padScoreVal,
+          hardwareTimestamp: timestamp,
+          updatedAt: new Date().toISOString(),
+        },
+        receipt: {
+          action: isSuccess ? 'AUTHENTICATE_SUCCESS' : (eventType === 'enrollment' ? 'ENROLLMENT_FAIL' : 'AUTHENTICATE_FAIL'),
+          terminalId,
+          reason,
+        },
+      });
+
+      broadcastApdu({
+        command: `00 20 00 00 (${eventType.toUpperCase()} fingerId: ${finalFingerId ?? 'N/A'})`,
+        response: isSuccess ? '90 00 (SW_SUCCESS)' : (eventType === 'enrollment' ? '6F 00 (SW_ENROLL_ERR)' : '6A 88 (SW_VERIFICATION_FAILED)'),
+        durationMs: Math.floor(25 + Math.random() * 20),
+        terminalId,
+      });
+
+      return res.status(200).json({
+        status: 'success',
+        success: true,
+        correlated: true,
+        verifyId: targetEvent.id,
+        eventId: targetEvent.id,
+        message: 'Access log correlated and updated successfully in database.',
+        event: targetEvent,
+      });
+    }
+
     const newEvent = {
       id: `evt-${crypto.randomBytes(4).toString('hex')}`,
       timestamp,
       type: eventType,
       cardId: card ? card.id : null,
       holder: card ? card.holder : (cardUid && cardUid !== 'UNKNOWN' ? `Terminal User (${cardUid})` : 'Terminal User'),
-      details: `[${terminalId}] ${reason}${finalFingerId !== null ? ` (Finger ID: ${finalFingerId})` : ''}${cardUid ? ` [Card UID: ${cardUid}]` : ''}`,
+      details: `[${terminalId}] ${reason}${finalFingerId !== null ? ` (Finger ID: ${finalFingerId})` : ''}${cardUid ? ` [Match On Card: ${cardUid}]` : ''}`,
       rawMetrics: {
         terminalId,
         cardUid: cardUid || null,
@@ -426,6 +484,7 @@ router.post('/access-log', async (req, res, next) => {
     return res.status(200).json({
       status: 'success',
       success: true,
+      correlated: false,
       eventId: newEvent.id,
       message: 'Access log recorded successfully to database.',
       event: newEvent,
@@ -436,5 +495,3 @@ router.post('/access-log', async (req, res, next) => {
 });
 
 export default router;
-
-

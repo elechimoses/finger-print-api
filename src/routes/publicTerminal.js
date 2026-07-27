@@ -154,17 +154,37 @@ router.post('/apdu-log', (req, res) => {
  * @access  Public (Signed with HMAC)
  */
 router.post('/access-log', async (req, res, next) => {
-  const { terminalId, cardUid, cardId, uid, success, reason, fingerId, timestamp } = req.body;
-
-  const targetCardUid = cardUid || cardId || uid || '';
-  const isSuccess = typeof success === 'boolean'
-    ? success
-    : (typeof success === 'string' ? success.toLowerCase() === 'true' : Boolean(success));
-
   try {
-    const card = targetCardUid
-      ? (await db.getCardById(targetCardUid) || await db.getCardBySerial(targetCardUid))
-      : null;
+    let body = req.body || {};
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch (e) {
+        body = {};
+      }
+    }
+
+    const terminalId = body.terminalId || body.terminal_id || req.query?.terminalId || 'TERM-ESP32-01';
+    const cardUid = body.cardUid || body.card_uid || body.cardId || body.uid || req.query?.cardUid || req.query?.uid || '';
+    const rawSuccess = body.success !== undefined ? body.success : req.query?.success;
+    const isSuccess = typeof rawSuccess === 'boolean'
+      ? rawSuccess
+      : (typeof rawSuccess === 'string' ? rawSuccess.toLowerCase() === 'true' : Boolean(rawSuccess));
+
+    const reason = body.reason || req.query?.reason || (isSuccess ? 'Access Granted' : 'Access Denied');
+    const fingerId = body.fingerId !== undefined ? body.fingerId : (body.finger_id !== undefined ? body.finger_id : req.query?.fingerId);
+    const timestamp = body.timestamp || req.query?.timestamp || new Date().toISOString();
+
+    let card = null;
+    if (cardUid) {
+      card = await db.getCardBySerial(cardUid) || await db.getCardById(cardUid);
+      if (!card) {
+        const { cards = [] } = await db.getCards({ pageSize: 1000 });
+        card = cards.find(
+          (c) => c.serial === cardUid || c.id === cardUid || c.serial?.toLowerCase() === String(cardUid).toLowerCase()
+        );
+      }
+    }
 
     if (card) {
       const updates = { lastSeen: new Date().toISOString() };
@@ -175,27 +195,26 @@ router.post('/access-log', async (req, res, next) => {
     }
 
     const eventType = isSuccess ? 'auth_success' : 'auth_fail';
-    const logTimestamp = timestamp || new Date().toISOString();
-    const finalReason = reason || (isSuccess ? 'Access Granted' : 'Access Denied');
+    const finalFingerId = fingerId !== undefined && fingerId !== null ? Number(fingerId) : null;
 
     const newEvent = {
       id: `evt-${crypto.randomBytes(4).toString('hex')}`,
-      timestamp: logTimestamp,
+      timestamp,
       type: eventType,
-      cardId: card ? card.id : (targetCardUid || 'N/A'),
-      holder: card ? card.holder : 'Terminal User',
-      details: `[${terminalId || 'TERM-ESP32-01'}] ${finalReason}${fingerId !== undefined && fingerId !== null ? ` (Finger ID: ${fingerId})` : ''}`,
+      cardId: card ? card.id : null,
+      holder: card ? card.holder : (cardUid ? `Terminal User (${cardUid})` : 'Terminal User'),
+      details: `[${terminalId}] ${reason}${finalFingerId !== null ? ` (Finger ID: ${finalFingerId})` : ''}${cardUid ? ` [Card UID: ${cardUid}]` : ''}`,
       rawMetrics: {
-        terminalId: terminalId || 'TERM-ESP32-01',
-        cardUid: targetCardUid || null,
-        fingerId: fingerId !== undefined && fingerId !== null ? Number(fingerId) : null,
-        reason: finalReason,
+        terminalId,
+        cardUid: cardUid || null,
+        fingerId: finalFingerId,
+        reason,
         success: isSuccess,
       },
       receipt: {
         action: isSuccess ? 'AUTHENTICATE_SUCCESS' : 'AUTHENTICATE_FAIL',
-        terminalId: terminalId || 'TERM-ESP32-01',
-        reason: finalReason,
+        terminalId,
+        reason,
       },
       minutiaeMapPoints: [],
       padScore: isSuccess ? 0.98 : 0.15,
@@ -205,14 +224,15 @@ router.post('/access-log', async (req, res, next) => {
 
     // Broadcast live APDU telemetry event
     broadcastApdu({
-      command: `00 20 00 00 (TERMINAL_ACCESS_LOG fingerId: ${fingerId ?? 'N/A'})`,
+      command: `00 20 00 00 (TERMINAL_ACCESS_LOG fingerId: ${finalFingerId ?? 'N/A'})`,
       response: isSuccess ? '90 00 (SW_SUCCESS)' : '6A 88 (SW_VERIFICATION_FAILED)',
       durationMs: Math.floor(25 + Math.random() * 20),
-      terminalId: terminalId || 'TERM-ESP32-01',
+      terminalId,
     });
 
     return res.status(200).json({
       status: 'success',
+      success: true,
       eventId: newEvent.id,
       message: 'Access log recorded successfully to database.',
       event: newEvent,
@@ -223,4 +243,5 @@ router.post('/access-log', async (req, res, next) => {
 });
 
 export default router;
+
 

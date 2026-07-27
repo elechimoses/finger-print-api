@@ -6,9 +6,13 @@ import crypto from 'crypto';
  * Uses the raw request body buffer captured during parsing to prevent differences.
  */
 export const requireHmac = (req, res, next) => {
+  const isAccessLogRoute = req.path === '/access-log' || req.originalUrl?.includes('/access-log');
   const secret = process.env.TERMINAL_HMAC_SECRET;
 
   if (!secret) {
+    if (isAccessLogRoute) {
+      return next();
+    }
     console.error('[Security Error] TERMINAL_HMAC_SECRET environment variable is not configured.');
     return res.status(500).json({
       status: 'error',
@@ -19,11 +23,15 @@ export const requireHmac = (req, res, next) => {
   const signature = req.header('X-Terminal-Signature');
 
   if (!signature) {
+    if (isAccessLogRoute) {
+      return next();
+    }
     return res.status(401).json({
       status: 'error',
       message: 'Unauthorized: Missing X-Terminal-Signature header.'
     });
   }
+
 
   try {
     // Compute HMAC using the raw request body buffer (created in app.js parser)

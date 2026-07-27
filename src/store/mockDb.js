@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { createClient } from '@supabase/supabase-js';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
 
 // Load environmental variables, supporting .env and .env.local
@@ -431,13 +432,30 @@ export const db = {
   },
 
   async addAuditLog(log) {
+    if (!log) return;
+    if (!log.id) {
+      log.id = `evt-${crypto.randomBytes(4).toString('hex')}`;
+    }
+    if (!log.timestamp) {
+      log.timestamp = new Date().toISOString();
+    }
+
+    // Unshift to in-memory fallback list
     inMemory.auditLogs.unshift(log);
+
     try {
       if (supabase) {
-        await supabase.from('audit_logs').insert(mapAuditLogToDb(log));
+        const payloadToInsert = mapAuditLogToDb(log);
+        const { error } = await supabase.from('audit_logs').insert(payloadToInsert);
+        if (error) {
+          console.error('[Supabase addAuditLog error]:', error);
+        }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('[Supabase addAuditLog exception]:', e);
+    }
   },
+
 
   // 7. Enrollment Sessions
   async getEnrollmentSession(id) {

@@ -1,8 +1,10 @@
 import express from 'express';
+import crypto from 'crypto';
 import { db } from '../store/mockDb.js';
 import { broadcastApdu } from './apduStream.js';
 
 const router = express.Router();
+
 
 /**
  * 1. POST /verify
@@ -274,4 +276,106 @@ router.post('/complete-enrollment', async (req, res, next) => {
   }
 });
 
+/**
+ * 5. POST /access-log
+ * Hardware Access Log callback endpoint (called directly by ESP32 hardware)
+ * Payload format from hardware:
+ * {
+ *   "terminalId": "TERM-01",
+ *   "cardUid": "...",
+ *   "success": true | false | "true" | "false",
+ *   "reason": "...",
+ *   "fingerId": 1,
+ *   "timestamp": "2026-07-27T21:05:25Z"
+ * }
+ */
+router.post('/access-log', async (req, res, next) => {
+  try {
+    let body = req.body || {};
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch (e) {
+        body = {};
+      }
+    }
+
+    const terminalId = body.terminalId || body.terminal_id || req.query?.terminalId || 'TERM-ESP32-01';
+    const cardUid = body.cardUid || body.card_uid || body.cardId || body.uid || req.query?.cardUid || req.query?.uid || '';
+    const rawSuccess = body.success !== undefined ? body.success : req.query?.success;
+    const isSuccess = typeof rawSuccess === 'boolean'
+      ? rawSuccess
+      : (typeof rawSuccess === 'string' ? rawSuccess.toLowerCase() === 'true' : Boolean(rawSuccess));
+
+    const reason = body.reason || req.query?.reason || (isSuccess ? 'Access Granted' : 'Access Denied');
+    const fingerId = body.fingerId !== undefined ? body.fingerId : (body.finger_id !== undefined ? body.finger_id : req.query?.fingerId);
+    const timestamp = body.timestamp || req.query?.timestamp || new Date().toISOString();
+
+    let card = null;
+    if (cardUid) {
+      card = await db.getCardBySerial(cardUid) || await db.getCardById(cardUid);
+      if (!card) {
+        const { cards = [] } = await db.getCards({ pageSize: 1000 });
+        card = cards.find(
+          (c) => c.serial === cardUid || c.id === cardUid || c.serial?.toLowerCase() === String(cardUid).toLowerCase()
+        );
+      }
+    }
+
+    if (card) {
+      const updates = { lastSeen: new Date().toISOString() };
+      if (isSuccess && card.syncStatus === 'failed') {
+        updates.syncStatus = 'synced';
+      }
+      await db.updateCard(card.id, updates);
+    }
+
+    const eventType = isSuccess ? 'auth_success' : 'auth_fail';
+    const finalFingerId = fingerId !== undefined && fingerId !== null ? Number(fingerId) : null;
+
+    const newEvent = {
+      id: `evt-${crypto.randomBytes(4).toString('hex')}`,
+      timestamp,
+      type: eventType,
+      cardId: card ? card.id : null,
+      holder: card ? card.holder : (cardUid ? `Terminal User (${cardUid})` : 'Terminal User'),
+      details: `[${terminalId}] ${reason}${finalFingerId !== null ? ` (Finger ID: ${finalFingerId})` : ''}${cardUid ? ` [Card UID: ${cardUid}]` : ''}`,
+      rawMetrics: {
+        terminalId,
+        cardUid: cardUid || null,
+        fingerId: finalFingerId,
+        reason,
+        success: isSuccess,
+      },
+      receipt: {
+        action: isSuccess ? 'AUTHENTICATE_SUCCESS' : 'AUTHENTICATE_FAIL',
+        terminalId,
+        reason,
+      },
+      minutiaeMapPoints: [],
+      padScore: isSuccess ? 0.98 : 0.15,
+    };
+
+    await db.addAuditLog(newEvent);
+
+    broadcastApdu({
+      command: `00 20 00 00 (HARDWARE_ACCESS_LOG fingerId: ${finalFingerId ?? 'N/A'})`,
+      response: isSuccess ? '90 00 (SW_SUCCESS)' : '6A 88 (SW_VERIFICATION_FAILED)',
+      durationMs: Math.floor(25 + Math.random() * 20),
+      terminalId,
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      success: true,
+      eventId: newEvent.id,
+      message: 'Access log recorded successfully to database.',
+      event: newEvent,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;
+

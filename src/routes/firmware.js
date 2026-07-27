@@ -33,15 +33,6 @@ router.post('/verify', async (req, res, next) => {
     if (card && card.status === 'active') {
       const livenessScore = Number(req.body?.livenessScore || req.body?.padScore || 0.98);
 
-      await db.addAuditLog({
-        type: 'auth_success',
-        cardId: card.id,
-        holder: card.holder,
-        details: `Access granted for RFID UID: ${uid} (Fingerprint Liveness Score: ${Math.round(livenessScore * 100)}%)`,
-        padScore: livenessScore,
-        rawMetrics: { livenessScore, rfidUid: uid, fingerId: card.fingerId },
-      });
-
       broadcastApdu({
         command: `00 20 00 00 08 (VERIFY FINGERPRINT ID #${card.fingerId || 1})`,
         response: '90 00 (SW_SUCCESS)',
@@ -59,17 +50,6 @@ router.post('/verify', async (req, res, next) => {
 
     const failureLiveness = Number(req.body?.livenessScore || req.body?.padScore || 0.15);
 
-    await db.addAuditLog({
-      type: 'auth_fail',
-      cardId: card ? card.id : uid,
-      holder: card ? card.holder : 'Unknown User',
-      details: card
-        ? `Access denied (Status: ${card.status}) for RFID UID: ${uid}`
-        : `Access denied (Unknown Card / Fingerprint mismatch for UID: ${uid})`,
-      padScore: failureLiveness,
-      rawMetrics: { livenessScore: failureLiveness, rfidUid: uid },
-    });
-
     broadcastApdu({
       command: `00 20 00 00 08 (VERIFY FINGERPRINT/RFID)`,
       response: '6A 88 (SW_VERIFICATION_FAILED)',
@@ -85,6 +65,7 @@ router.post('/verify', async (req, res, next) => {
     next(err);
   }
 });
+
 
 /**
  * 2. GET /add-card

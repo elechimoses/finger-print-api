@@ -190,4 +190,169 @@ router.post('/resync', async (req, res, next) => {
   }
 });
 
+/**
+ * @route   DELETE /api/v1/cards/:cardId
+ * @desc    deleteCard: Permanently delete a card by cardId or serial number
+ * @access  Private (session required)
+ */
+router.delete('/:cardId', async (req, res, next) => {
+  const { cardId } = req.params;
+
+  try {
+    let card = await db.getCardById(cardId);
+    if (!card) {
+      card = await db.getCardBySerial(cardId);
+    }
+
+    if (!card) {
+      return res.status(404).json({
+        status: 'error',
+        message: `Card '${cardId}' not found.`
+      });
+    }
+
+    // Delete card from DB / memory
+    await db.deleteCard(card.id);
+
+    // Log deletion in audit logs
+    await db.addAuditLog({
+      id: `evt-${crypto.randomBytes(4).toString('hex')}`,
+      timestamp: new Date().toISOString(),
+      type: 'card_deletion',
+      cardId: card.id,
+      holder: card.holder,
+      details: `Captured card ${card.id} (serial: ${card.serial}, holder: ${card.holder}) was permanently deleted from system.`,
+      rawMetrics: {},
+      receipt: { action: 'DELETE_CARD', operator: 'admin' },
+      minutiaeMapPoints: [],
+      padScore: 0
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      message: `Card '${card.id}' (${card.holder}) was successfully deleted.`,
+      deletedCard: card
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @route   POST /api/v1/cards/delete
+ * @desc    deleteCardPost: Alternative endpoint to delete card by cardId or serial in body
+ * @access  Private (session required)
+ */
+router.post('/delete', async (req, res, next) => {
+  const { cardId, serial, id } = req.body || {};
+  const targetId = cardId || id || serial;
+
+  if (!targetId) {
+    return res.status(400).json({
+      status: 'error',
+      message: 'cardId or serial is required in request body.'
+    });
+  }
+
+  try {
+    let card = await db.getCardById(targetId);
+    if (!card) {
+      card = await db.getCardBySerial(targetId);
+    }
+
+    if (!card) {
+      return res.status(404).json({
+        status: 'error',
+        message: `Card '${targetId}' not found.`
+      });
+    }
+
+    await db.deleteCard(card.id);
+
+    await db.addAuditLog({
+      id: `evt-${crypto.randomBytes(4).toString('hex')}`,
+      timestamp: new Date().toISOString(),
+      type: 'card_deletion',
+      cardId: card.id,
+      holder: card.holder,
+      details: `Captured card ${card.id} (serial: ${card.serial}, holder: ${card.holder}) was permanently deleted from system.`,
+      rawMetrics: {},
+      receipt: { action: 'DELETE_CARD', operator: 'admin' },
+      minutiaeMapPoints: [],
+      padScore: 0
+    });
+
+    return res.status(200).json({
+      status: 'success',
+      message: `Card '${card.id}' (${card.holder}) was successfully deleted.`,
+      deletedCard: card
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @route   DELETE /api/v1/cards
+ * @desc    bulkDeleteCards: Delete multiple cards by array of cardIds or status filter
+ * @access  Private (session required)
+ */
+router.delete('/', async (req, res, next) => {
+  const { cardIds, status } = req.body || {};
+  const filterStatus = req.query?.status || status;
+
+  try {
+    let deletedCount = 0;
+    const deletedCards = [];
+
+    if (Array.isArray(cardIds) && cardIds.length > 0) {
+      for (const targetId of cardIds) {
+        let card = await db.getCardById(targetId) || await db.getCardBySerial(targetId);
+        if (card) {
+          await db.deleteCard(card.id);
+          deletedCards.push(card);
+          deletedCount++;
+        }
+      }
+    } else if (filterStatus) {
+      const { cards = [] } = await db.getCards({ pageSize: 1000 });
+      const matchingCards = cards.filter(c => c.status === filterStatus);
+      for (const card of matchingCards) {
+        await db.deleteCard(card.id);
+        deletedCards.push(card);
+        deletedCount++;
+      }
+    } else {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Provide an array of cardIds in body or status query filter (e.g. ?status=revoked) for bulk deletion.'
+      });
+    }
+
+    if (deletedCount > 0) {
+      await db.addAuditLog({
+        id: `evt-${crypto.randomBytes(4).toString('hex')}`,
+        timestamp: new Date().toISOString(),
+        type: 'bulk_card_deletion',
+        cardId: null,
+        holder: null,
+        details: `Bulk deleted ${deletedCount} card(s) from system.`,
+        rawMetrics: { count: deletedCount },
+        receipt: { action: 'BULK_DELETE_CARDS', operator: 'admin' },
+        minutiaeMapPoints: [],
+        padScore: 0
+      });
+    }
+
+    return res.status(200).json({
+      status: 'success',
+      message: `Successfully deleted ${deletedCount} card(s).`,
+      deletedCount,
+      deletedCards
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

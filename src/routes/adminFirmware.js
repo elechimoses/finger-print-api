@@ -122,17 +122,37 @@ router.get('/users', async (req, res, next) => {
 });
 
 /**
- * DELETE /api/admin/users/:id
- * Revoke user access.
+ * DELETE /api/admin/users/:id or DELETE /api/admin/cards/:id
+ * Revoke user access or permanently delete card (with ?permanent=true or ?action=delete).
  */
-router.delete('/users/:id', async (req, res, next) => {
+async function deleteOrRevokeUserCard(req, res, next) {
   try {
     const { id } = req.params;
+    const isPermanent = req.query?.permanent === 'true' || req.query?.action === 'delete' || req.path.includes('/cards/');
+    
     const { cards = [] } = await db.getCards({ pageSize: 1000 });
     const card = cards.find((c) => c.id === id || c.serial === id);
 
     if (!card) {
       return res.status(404).json({ status: 'error', message: `User card ${id} not found.` });
+    }
+
+    if (isPermanent) {
+      await db.deleteCard(card.id);
+
+      await db.addAuditLog({
+        type: 'card_deletion',
+        cardId: card.id,
+        holder: card.holder,
+        details: `User ${card.holder} (RFID UID: ${card.serial}) card deleted via Admin API.`,
+        padScore: 0.0,
+      });
+
+      return res.status(200).json({
+        status: 'success',
+        message: `Card for ${card.holder} permanently deleted successfully.`,
+        deletedCard: card,
+      });
     }
 
     const updated = await db.updateCard(card.id, {
@@ -156,6 +176,9 @@ router.delete('/users/:id', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
-});
+}
+
+router.delete('/users/:id', deleteOrRevokeUserCard);
+router.delete('/cards/:id', deleteOrRevokeUserCard);
 
 export default router;

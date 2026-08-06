@@ -354,13 +354,18 @@ export const db = {
     }
   },
 
-  async deleteCard(cardId) {
-    inMemory.cards = inMemory.cards.filter(c => c.id !== cardId);
+  async deleteCard(cardIdentifier) {
+    const cardToDelete = inMemory.cards.find(c => c.id === cardIdentifier || c.serial === cardIdentifier);
+    const id = cardToDelete ? cardToDelete.id : cardIdentifier;
+    
+    inMemory.cards = inMemory.cards.filter(c => c.id !== id && c.serial !== cardIdentifier);
     try {
       if (supabase) {
-        await supabase.from('cards').delete().eq('id', cardId);
+        await supabase.from('cards').delete().or(`id.eq.${id},serial.eq.${cardIdentifier}`);
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('[Supabase deleteCard error]:', e);
+    }
   },
 
   async updateCard(cardId, updates) {
